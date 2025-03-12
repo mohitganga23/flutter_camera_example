@@ -1,11 +1,13 @@
 import 'dart:io';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
-
-import 'permission_status.dart';
+import 'package:screenshot/screenshot.dart';
 
 class CameraScreen extends StatefulWidget {
   const CameraScreen({super.key});
@@ -28,7 +30,9 @@ class CameraScreenState extends State<CameraScreen> {
   double _zoomOutScale = 1.0;
   double _switchCameraScale = 1.0;
 
-  Future<PermissionStatusEnum>? cameraPermissionFtrBldr;
+  Future<PermissionStatus>? cameraPermissionFtrBldr;
+
+  ScreenshotController screenshotController = ScreenshotController();
 
   @override
   void initState() {
@@ -37,17 +41,23 @@ class CameraScreenState extends State<CameraScreen> {
     cameraPermissionFtrBldr = initializeCameraPermission();
   }
 
-  Future<PermissionStatusEnum> initializeCameraPermission() async {
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  Future<PermissionStatus> initializeCameraPermission() async {
     PermissionStatus status = await Permission.camera.request();
     if (status.isGranted) {
       await _initializeCamera();
-      return PermissionStatusEnum.granted;
+      return PermissionStatus.granted;
     } else if (status.isDenied) {
-      return PermissionStatusEnum.denied;
+      return PermissionStatus.denied;
     } else if (status.isPermanentlyDenied) {
-      return PermissionStatusEnum.permanentlyDenied;
+      return PermissionStatus.permanentlyDenied;
     } else {
-      return PermissionStatusEnum.unknown;
+      return PermissionStatus.permanentlyDenied;
     }
   }
 
@@ -77,7 +87,6 @@ class CameraScreenState extends State<CameraScreen> {
       await _controller!.setFlashMode(flashModes[nextIndex]);
 
       setState(() => _flashScale = 1.1);
-
       Future.delayed(Duration(milliseconds: 300), () {
         setState(() => _flashScale = 1.0);
       });
@@ -88,8 +97,8 @@ class CameraScreenState extends State<CameraScreen> {
     if (_controller != null) {
       _zoomLevel = (_zoomLevel + 0.1).clamp(1.0, 8.0);
       await _controller!.setZoomLevel(_zoomLevel);
-      setState(() => _zoomInScale = 1.1);
 
+      setState(() => _zoomInScale = 1.1);
       Future.delayed(Duration(milliseconds: 300), () {
         setState(() => _zoomInScale = 1.0);
       });
@@ -109,20 +118,6 @@ class CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  Future<void> _captureImage() async {
-    if (!_controller!.value.isInitialized) return;
-
-    final XFile image = await _controller!.takePicture();
-    print("Image captured: ${image.path}");
-
-    var data = await Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => PreviewScreen(imagePath: image.path),
-      ),
-    );
-  }
-
   void _switchCamera() async {
     if (cameras != null && cameras!.length > 1) {
       _selectedCameraIndex = (_selectedCameraIndex == 0) ? 1 : 0;
@@ -137,154 +132,182 @@ class CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  Future<void> _captureImage() async {
+    if (!_controller!.value.isInitialized) return;
+
+    final XFile image = await _controller!.takePicture();
+    print("Image captured: ${image.path}");
+
+    Position currentPosition = await _determinePosition();
+
+    File cI = File(image.path);
+
+    Uint8List cU = await screenshotController.captureFromWidget(
+      imageCapture(
+        file: cI,
+        latitude: currentPosition.latitude.toStringAsFixed(6),
+        longitude: currentPosition.longitude.toStringAsFixed(6),
+      ),
+    );
+
+    String dir = (await getTemporaryDirectory()).path;
+    String filePath = "$dir/${DateTime.now().millisecondsSinceEpoch}.jpg";
+
+    File finalImage = File(filePath);
+    await finalImage.writeAsBytes(cU);
+
+    var data = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => PreviewScreen(imagePath: finalImage.path),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: FutureBuilder<PermissionStatusEnum>(
+      backgroundColor: Colors.black,
+      body: FutureBuilder<PermissionStatus>(
         future: cameraPermissionFtrBldr,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return Center(child: CircularProgressIndicator());
           } else if (snapshot.hasError) {
             return Center(child: Text('Error: ${snapshot.error}'));
-          } else if (snapshot.data == PermissionStatusEnum.granted) {
-            return Stack(
-              alignment: Alignment.center,
+          } else if (snapshot.data == PermissionStatus.granted) {
+            return Column(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                if (_isCameraInitialized)
-                  Positioned.fill(child: CameraPreview(_controller!))
-                else
-                  Center(child: CircularProgressIndicator()),
-
-                Positioned(
-                  bottom: 0,
-                  left: 0,
-                  right: 0,
-                  child: Container(
-                    height: 120,
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [
-                          Colors.transparent,
-                          Colors.black.withValues(alpha: 0.5),
-                        ],
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                      ),
-                    ),
-                  ),
-                ),
-
-                // Controls with larger icons and shadow/glow effect
-                Positioned(
-                  bottom: 30,
-                  left: 20,
-                  right: 20,
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      // Flash Button with shadow/glow effect
-                      AnimatedScale(
-                        duration: Duration(milliseconds: 300),
-                        scale: _flashScale,
-                        child: IconButton(
-                          icon: Icon(
-                            _controller!.value.flashMode == FlashMode.auto
-                                ? Icons.flash_auto
-                                : _controller!.value.flashMode ==
-                                        FlashMode.torch
-                                    ? Icons.flash_on
-                                    : Icons.flash_off,
-                            color: Colors.white,
-                            size: 40,
-                          ),
-                          onPressed: () {
-                            _toggleFlash();
-                          },
-                        ),
-                      ),
-                      // IconButton(
-                      //   icon: Icon(
-                      //     _controller!.value.flashMode == FlashMode.auto
-                      //         ? Icons.flash_auto
-                      //         : _controller!.value.flashMode == FlashMode.torch
-                      //         ? Icons.flash_on
-                      //         : Icons.flash_off,
-                      //     color: Colors.white,
-                      //     size: 36,
-                      //   ),
-                      //   onPressed: _toggleFlash,
-                      // ),
-
-                      // Zoom controls and capture button
-                      Expanded(
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            AnimatedScale(
-                              duration: Duration(milliseconds: 300),
-                              scale: _zoomInScale,
-                              child: IconButton(
-                                icon: Icon(
-                                  Icons.zoom_in,
-                                  color: Colors.white,
-                                  size: 36,
-                                ),
-                                onPressed: _zoomIn,
-                              ),
-                            ),
-                            SizedBox(width: 20),
-                            InkWell(
-                              onTap: _captureImage,
-                              child: Stack(
-                                alignment: Alignment.center,
-                                children: [
-                                  Icon(
-                                    Icons.circle,
-                                    color: Colors.white38,
-                                    size: 80,
-                                  ),
-                                  Icon(
-                                    Icons.circle,
+                _isCameraInitialized
+                    ? Expanded(
+                        child: CameraPreview(
+                          _controller!,
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              AppBar(
+                                backgroundColor: Colors.transparent,
+                                elevation: 0,
+                                automaticallyImplyLeading: true,
+                                leading: GestureDetector(
+                                  onTap: () => Navigator.of(context).pop(),
+                                  child: Icon(
+                                    CupertinoIcons.arrow_left_circle_fill,
                                     color: Colors.white,
-                                    size: 65,
+                                    size: 30,
                                   ),
-                                ],
-                              ),
-                            ),
-                            SizedBox(width: 20),
-                            AnimatedScale(
-                              duration: Duration(milliseconds: 300),
-                              scale: _zoomOutScale,
-                              child: IconButton(
-                                icon: Icon(
-                                  Icons.zoom_out,
-                                  color: Colors.white,
-                                  size: 36,
                                 ),
-                                onPressed: _zoomOut,
                               ),
-                            ),
-                          ],
-                        ),
-                      ),
+                              Container(
+                                padding: EdgeInsets.symmetric(
+                                  vertical: 24,
+                                  horizontal: 12,
+                                ),
+                                decoration: BoxDecoration(color: Colors.black),
+                                child: Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    // Flash Button with shadow/glow effect
+                                    AnimatedScale(
+                                      duration: Duration(milliseconds: 300),
+                                      scale: _flashScale,
+                                      child: IconButton(
+                                        icon: Icon(
+                                          _controller!.value.flashMode ==
+                                                  FlashMode.auto
+                                              ? Icons.flash_auto
+                                              : _controller!.value.flashMode ==
+                                                      FlashMode.torch
+                                                  ? Icons.flash_on
+                                                  : Icons.flash_off,
+                                          color: Colors.white,
+                                          size: 30,
+                                        ),
+                                        onPressed: () {
+                                          _toggleFlash();
+                                        },
+                                      ),
+                                    ),
 
-                      // Camera switch button with shadow/glow effect
-                      AnimatedScale(
-                        duration: Duration(milliseconds: 300),
-                        scale: _switchCameraScale,
-                        child: IconButton(
-                          icon: Icon(
-                            Icons.cameraswitch,
-                            color: Colors.white,
-                            size: 36,
+                                    // Zoom controls and capture button
+                                    Expanded(
+                                      child: Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
+                                        children: [
+                                          AnimatedScale(
+                                            duration:
+                                                Duration(milliseconds: 300),
+                                            scale: _zoomInScale,
+                                            child: IconButton(
+                                              icon: Icon(
+                                                Icons.zoom_in,
+                                                color: Colors.white,
+                                                size: 30,
+                                              ),
+                                              onPressed: _zoomIn,
+                                            ),
+                                          ),
+                                          SizedBox(width: 20),
+                                          InkWell(
+                                            onTap: _captureImage,
+                                            child: Stack(
+                                              alignment: Alignment.center,
+                                              children: [
+                                                Icon(
+                                                  Icons.circle,
+                                                  color: Colors.white38,
+                                                  size: 65,
+                                                ),
+                                                Icon(
+                                                  Icons.circle,
+                                                  color: Colors.white,
+                                                  size: 50,
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          SizedBox(width: 20),
+                                          AnimatedScale(
+                                            duration:
+                                                Duration(milliseconds: 300),
+                                            scale: _zoomOutScale,
+                                            child: IconButton(
+                                              icon: Icon(
+                                                Icons.zoom_out,
+                                                color: Colors.white,
+                                                size: 30,
+                                              ),
+                                              onPressed: _zoomOut,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+
+                                    // Camera switch button with shadow/glow effect
+                                    AnimatedScale(
+                                      duration: Duration(milliseconds: 300),
+                                      scale: _switchCameraScale,
+                                      child: IconButton(
+                                        icon: Icon(
+                                          Icons.cameraswitch,
+                                          color: Colors.white,
+                                          size: 30,
+                                        ),
+                                        onPressed: _switchCamera,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
                           ),
-                          onPressed: _switchCamera,
                         ),
-                      ),
-                    ],
-                  ),
-                ),
+                      )
+                    : Center(child: CircularProgressIndicator()),
               ],
             );
           } else {
@@ -320,10 +343,139 @@ class CameraScreenState extends State<CameraScreen> {
     );
   }
 
-  @override
-  void dispose() {
-    _controller?.dispose();
-    super.dispose();
+  Widget imageCapture({
+    required File file,
+    required String latitude,
+    required String longitude,
+  }) {
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: Image.file(
+            file,
+            fit: BoxFit.fill,
+          ),
+        ),
+        Positioned(
+          bottom: 10,
+          left: 10,
+          child: Container(
+            padding: EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.5),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  "Latitude: $latitude",
+                  style: const TextStyle(color: Colors.white, fontSize: 15),
+                ),
+                Text(
+                  "Longitude: $longitude",
+                  style: const TextStyle(color: Colors.white, fontSize: 15),
+                ),
+                Text(
+                  "Date: ${DateTime.now().toString()}",
+                  style: const TextStyle(color: Colors.white, fontSize: 15),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<Position> _determinePosition() async {
+    bool serviceEnabled;
+    LocationPermission permission;
+
+    // Check if location services are enabled
+    serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      _showLocationDialog(
+        'Location services are disabled.',
+        'Enable Location',
+        () async {
+          await Geolocator.openLocationSettings();
+        },
+      );
+      return Future.error('Location services are disabled.');
+    }
+
+    permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        _showLocationDialog(
+          'Location permissions are denied.',
+          'Request Permission',
+          () async {
+            await Geolocator.requestPermission();
+          },
+        );
+        return Future.error('Location permissions are denied.');
+      }
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      _showLocationDialog(
+        'Location permissions are permanently denied. Please enable them in settings.',
+        'Open Settings',
+        () async {
+          await openAppSettings();
+        },
+      );
+      return Future.error('Location permissions are permanently denied.');
+    }
+
+    // Permissions are granted, fetch location
+    return await Geolocator.getCurrentPosition();
+  }
+
+  void _showLocationDialog(
+    String message,
+    String actionLabel,
+    VoidCallback onActionPress,
+  ) {
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: false,
+      barrierLabel: "Location Permission Dialog",
+      pageBuilder: (context, animation, secondaryAnimation) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(15),
+          ),
+          title: Text("Permission Required"),
+          content: Text(message),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text("Cancel"),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                onActionPress();
+              },
+              child: Text(actionLabel),
+            ),
+          ],
+        );
+      },
+      transitionBuilder: (context, anim1, anim2, child) {
+        return Transform.scale(
+          scale: Tween<double>(
+            begin: 0.5,
+            end: 1.0,
+          ).chain(CurveTween(curve: Curves.easeInOutBack)).evaluate(anim1),
+          child: child,
+        );
+      },
+    );
   }
 }
 
@@ -344,8 +496,7 @@ class _PreviewScreenState extends State<PreviewScreen>
   final _transformationController = TransformationController();
   TapDownDetails? _doubleTapDetails;
 
-  double _scale = 1.0;
-  double _previousScale = 1.0;
+  double scale = 1.0;
 
   @override
   void initState() {
@@ -367,26 +518,20 @@ class _PreviewScreenState extends State<PreviewScreen>
   }
 
   void _handleDoubleTap() {
-    Matrix4? _endMatrix;
-    Offset _position = _doubleTapDetails!.localPosition;
+    Matrix4? endMatrix;
 
     if (_transformationController.value != Matrix4.identity()) {
-      _endMatrix = Matrix4.identity();
+      endMatrix = Matrix4.identity();
     } else {
       final position = _doubleTapDetails!.localPosition;
-      _endMatrix = Matrix4.identity()
+      endMatrix = Matrix4.identity()
         ..translate(-position.dx, -position.dy)
         ..scale(2.0);
-
-      // For a 3x zoom
-      // _transformationController.value = Matrix4.identity()
-      //   ..translate(-position.dx * 2, -position.dy * 2)
-      //   ..scale(3.0);
     }
 
     _animation = Matrix4Tween(
       begin: _transformationController.value,
-      end: _endMatrix,
+      end: endMatrix,
     ).animate(
       CurveTween(curve: Curves.easeOut).animate(_animationController!),
     );
@@ -414,7 +559,7 @@ class _PreviewScreenState extends State<PreviewScreen>
             maxScale: 3.0,
             scaleEnabled: true,
             child: Transform.scale(
-              scale: _scale,
+              scale: scale,
               child: Image.file(File(widget.imagePath)),
             ),
           ),
